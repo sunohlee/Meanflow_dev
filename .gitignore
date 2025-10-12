@@ -1,0 +1,79 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+.conda/
+conda-meta/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Training outputs
+results/
+logs/
+*.log
+wandb/
+tensorboard/
+
+# Generated samples
+samples/
+generated/
+outputs/
+
+# Data (auto-downloaded)
+data/datasets/
+*.zip
+*.tar
+*.tar.gz
+
+# Model checkpoints (keep checkpoints/ directory structure but ignore large files)
+# Uncomment the line below if you want to exclude all checkpoints from git
+# checkpoints/*.pt
+# checkpoints/*.pth
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# FID computation
+fid_results/
+*.json
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Misc
+*.bak
+*.orig
+
