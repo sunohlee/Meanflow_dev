@@ -1,10 +1,13 @@
 # Image Generation Challenge
 
+
+
 **Mid Evaluation Submission Due:** November 1 (Saturday) 23:59 KST  
 **Final Submission Due:** November 15 (Saturday) 23:59 KST  
 **Where to Submit:** KLMS
 
 ## Overview
+<img width="384" height="192" alt="Image" src="https://github.com/user-attachments/assets/13225cab-ccfe-40da-badf-e402243721e4" />
 
 In this challenge, you will train an image diffusion/flow model beyond the previous 2D toy experiment setups from the assignments. After training, you are encouraged to explore and apply any techniques you find effective for achieving high-quality generation with only a few sampling steps.
 
