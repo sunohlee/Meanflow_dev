@@ -1,166 +1,256 @@
 #!/usr/bin/env python3
 """
-Template for implementing custom generative models
-Students should create their own implementation by inheriting from the base classes.
-
-This file provides skeleton code for implementing generative models.
-Students need to implement the TODO sections in their own files.
+MeanFlow implementation - Minimal version based on MeanFlow paper
+Single-step flow matching with bootstrap mechanism
 """
 
 import torch
+import torch.nn as nn
+import numpy as np
+from torch.func import jvp
 from src.base_model import BaseScheduler, BaseGenerativeModel
 from src.network import UNet
 
 
 # ============================================================================
-# GENERATIVE MODEL SKELETON
+# MEANFLOW SCHEDULER
 # ============================================================================
 
-class CustomScheduler(BaseScheduler):
+class MeanFlowScheduler(BaseScheduler):
     """
-    Custom Scheduler Skeleton
-    
-    TODO: Students need to implement this class in their own file.
-    Required methods:
-    1. sample_timesteps: Sample random timesteps for training
-    2. forward_process: Apply forward process to transform data
-    3. reverse_process_step: Perform one step of the reverse process
-    4. get_target: Get target for model prediction
+    MeanFlow Scheduler for flow-based generation with linear interpolation
     """
     
     def __init__(self, num_train_timesteps: int = 1000, **kwargs):
         super().__init__(num_train_timesteps, **kwargs)
-        # TODO: Initialize your scheduler-specific parameters (e.g., betas, alphas, sigma_min)
+        self.path_type = kwargs.get('path_type', 'linear')
+        self.time_sampler = kwargs.get('time_sampler', 'logit_normal')
+        self.time_mu = kwargs.get('time_mu', -0.4)
+        self.time_sigma = kwargs.get('time_sigma', 1.0)
+        self.ratio_r_not_equal_t = kwargs.get('ratio_r_not_equal_t', 0.75)
+    
+    def interpolant(self, t):
+        """Define interpolation function for flow matching"""
+        if self.path_type == "linear":
+            alpha_t = 1 - t
+            sigma_t = t
+            d_alpha_t = -1
+            d_sigma_t = 1
+        else:
+            raise NotImplementedError(f"Path type {self.path_type} not implemented")
+        
+        return alpha_t, sigma_t, d_alpha_t, d_sigma_t
     
     def sample_timesteps(self, batch_size: int, device: torch.device):
         """
-        Sample random timesteps for training.
-        
-        Returns:
-            Tensor of shape (batch_size,) with timestep values
+        Sample time steps (r, t) for MeanFlow training
+        Returns two timesteps: r (start) and t (end) where t > r
         """
-        raise NotImplementedError("Students need to implement this method")
+        if self.time_sampler == "uniform":
+            time_samples = torch.rand(batch_size, 2, device=device)
+        elif self.time_sampler == "logit_normal":
+            normal_samples = torch.randn(batch_size, 2, device=device)
+            normal_samples = normal_samples * self.time_sigma + self.time_mu
+            time_samples = torch.sigmoid(normal_samples)
+        else:
+            raise ValueError(f"Unknown time sampler: {self.time_sampler}")
+        
+        # Ensure t > r by sorting
+        sorted_samples, _ = torch.sort(time_samples, dim=1)
+        r, t = sorted_samples[:, 0], sorted_samples[:, 1]
+        
+        # Control proportion of r=t samples
+        fraction_equal = 1.0 - self.ratio_r_not_equal_t
+        equal_mask = torch.rand(batch_size, device=device) < fraction_equal
+        r = torch.where(equal_mask, t, r)
+        
+        return r, t
     
     def forward_process(self, data, noise, t):
-        """
-        Apply forward process to add noise to clean data.
-        
-        Args:
-            data: Clean data tensor
-            noise: Noise tensor
-            t: Timestep tensor
-            
-        Returns:
-            Noisy data at timestep t
-        """
-        raise NotImplementedError("Students need to implement this method")
+        """Apply forward interpolation: z_t = (1-t) * data + t * noise"""
+        alpha_t, sigma_t, _, _ = self.interpolant(t.view(-1, 1, 1, 1))
+        z_t = alpha_t * data + sigma_t * noise
+        return z_t
     
     def reverse_process_step(self, xt, pred, t, t_next):
         """
-        Perform one step of the reverse (denoising) process.
+        Perform one reverse step: z_r = z_t - (t-r) * u(z_t, r, t)
         
         Args:
-            xt: Current noisy data
-            pred: Model prediction (e.g., predicted noise, velocity, or x0)
-            t: Current timestep
-            t_next: Next timestep
-            
-        Returns:
-            Updated data at timestep t_next
+            xt: Current state at time t
+            pred: Predicted velocity u(z_t, r, t)
+            t: Current time (scalar or batch)
+            t_next: Next time (r, target time)
         """
-        raise NotImplementedError("Students need to implement this method")
+        if isinstance(t, float):
+            time_diff = t - t_next
+        else:
+            time_diff = (t - t_next).view(-1, 1, 1, 1)
+        
+        return xt - time_diff * pred
     
     def get_target(self, data, noise, t):
         """
-        Get the target for model prediction (what the network should learn to predict).
-        
-        Args:
-            data: Clean data
-            noise: Noise
-            t: Timestep
-            
-        Returns:
-            Target tensor (e.g., noise for DDPM, velocity for Flow Matching)
+        Get instantaneous velocity v_t for flow matching
+        v_t = d_alpha_t * data + d_sigma_t * noise
         """
-        raise NotImplementedError("Students need to implement this method")
+        _, _, d_alpha_t, d_sigma_t = self.interpolant(t.view(-1, 1, 1, 1))
+        v_t = d_alpha_t * data + d_sigma_t * noise
+        return v_t
 
 
-class CustomGenerativeModel(BaseGenerativeModel):
+# ============================================================================
+# MEANFLOW MODEL
+# ============================================================================
+
+class MeanFlowModel(BaseGenerativeModel):
     """
-    Custom Generative Model Skeleton
-    
-    Students need to implement this class by inheriting from BaseGenerativeModel.
-    This class wraps the network and scheduler to provide training and sampling interfaces.
+    MeanFlow Generative Model with bootstrap mechanism
     """
     
     def __init__(self, network, scheduler, **kwargs):
         super().__init__(network, scheduler, **kwargs)
-        # TODO: Initialize your model-specific parameters (e.g., EMA, loss weights)
+        self.weighting = kwargs.get('weighting', 'uniform')
+        self.adaptive_p = kwargs.get('adaptive_p', 1.0)
     
     def compute_loss(self, data, noise, **kwargs):
         """
-        Compute the training loss.
+        Compute MeanFlow loss with bootstrap mechanism (Eq. 10 in paper)
         
-        Args:
-            data: Clean data batch
-            noise: Noise batch (or x0 for flow models)
-            **kwargs: Additional arguments
-            
-        Returns:
-            Loss tensor
+        Loss = ||u(z_t, r, t) - [v_t - (t-r) * ∂u/∂t]||^2
         """
-        raise NotImplementedError("Students need to implement this method")
+        batch_size = data.shape[0]
+        device = data.device
+        
+        # Sample time steps (r, t)
+        r, t = self.scheduler.sample_timesteps(batch_size, device)
+        
+        # Get interpolated state z_t
+        z_t = self.scheduler.forward_process(data, noise, t)
+        
+        # Get instantaneous velocity v_t
+        v_t = self.scheduler.get_target(data, noise, t)
+        time_diff = (t - r).view(-1, 1, 1, 1)
+        
+        # Predict u(z_t, r, t) using the network
+        u = self.predict(z_t, t, r=r)
+        
+        # Compute JVP: ∂u/∂t using automatic differentiation
+        # CRITICAL: Pre-compute time_diff outside JVP to avoid unwanted derivatives
+        network = self.network.module if isinstance(self.network, torch.nn.DataParallel) else self.network
+        time_diff_for_condition = t - r  # Pre-compute OUTSIDE JVP
+        
+        def fn_for_jvp(z, cur_t):
+            # Use pre-computed time_diff (constant in JVP)
+            # This ensures we only compute ∂u/∂t, not ∂u/∂condition
+            return network(z, cur_t, condition=time_diff_for_condition)
+        
+        # JVP w.r.t. z and t only
+        primals = (z_t, t)
+        tangents = (v_t, torch.ones_like(t))
+        _, dudt = jvp(fn_for_jvp, primals, tangents)
+        
+        # Bootstrap target: v_t - (t-r) * ∂u/∂t
+        u_target = v_t - time_diff * dudt
+        
+        # Compute loss
+        error = u - u_target.detach()
+        loss_per_sample = torch.sum((error**2).reshape(error.shape[0], -1), dim=-1)
+        
+        # Apply adaptive weighting if specified
+        if self.weighting == "adaptive":
+            weights = 1.0 / (loss_per_sample.detach() + 1e-3).pow(self.adaptive_p)
+            loss = weights * loss_per_sample
+        else:
+            loss = loss_per_sample
+        
+        return loss.mean()
     
     def predict(self, xt, t, **kwargs):
         """
-        Make prediction given noisy data and timestep.
+        Make prediction u(z_t, r, t)
         
         Args:
-            xt: Noisy data
-            t: Timestep
-            **kwargs: Additional arguments (e.g., condition for additional timestep)
-            
-        Returns:
-            Model prediction
+            xt: State at time t
+            t: Current time
+            r: Start time (from kwargs)
         """
-        raise NotImplementedError("Students need to implement this method")
+        r = kwargs.get('r', None)
+        
+        if r is not None:
+            # Encode both t and (t-r) as time conditioning
+            # Use t-r as the additional condition
+            time_diff = t - r
+            return self.network(xt, t, condition=time_diff)
+        else:
+            # Inference mode: r is implicitly 0 or needs to be specified
+            return self.network(xt, t)
     
-    def sample(self, shape, num_inference_timesteps=20, return_traj=False, verbose=False, **kwargs):
+    @torch.no_grad()
+    def sample(self, shape, num_inference_timesteps=1, return_traj=False, verbose=False, **kwargs):
         """
-        Generate samples from noise using the reverse process.
+        MeanFlow sampling: z_0 = z_1 - (1-0) * u(z_1, 0, 1)
         
-        Args:
-            shape: Shape of samples to generate (batch_size, channels, height, width)
-            num_inference_timesteps: Number of denoising steps (NFE)
-            return_traj: Whether to return the full trajectory
-            verbose: Whether to show progress
-            **kwargs: Additional arguments
-            
-        Returns:
-            Generated samples (or trajectory if return_traj=True)
+        For single-step (NFE=1): x_0 = x_1 - u(x_1, 0, 1)
+        For multi-step: iteratively apply z_r = z_t - (t-r) * u(z_t, r, t)
         """
-        raise NotImplementedError("Students need to implement this method")
+        device = self.device
+        batch_size = shape[0]
+        
+        # Start from noise (z_1)
+        z = torch.randn(shape, device=device)
+        
+        if return_traj:
+            trajectory = [z.cpu()]
+        
+        if num_inference_timesteps == 1:
+            # Single-step generation
+            r = torch.zeros(batch_size, device=device)
+            t = torch.ones(batch_size, device=device)
+            
+            u = self.predict(z, t, r=r)
+            x0 = z - u  # z_0 = z_1 - u(z_1, 0, 1)
+            
+            if return_traj:
+                trajectory.append(x0.cpu())
+                return trajectory
+            return x0
+        else:
+            # Multi-step generation
+            time_steps = torch.linspace(1, 0, num_inference_timesteps + 1, device=device)
+            
+            for i in range(num_inference_timesteps):
+                t_cur = time_steps[i].item()
+                t_next = time_steps[i + 1].item()
+                
+                t = torch.full((batch_size,), t_cur, device=device)
+                r = torch.full((batch_size,), t_next, device=device)
+                
+                u = self.predict(z, t, r=r)
+                z = self.scheduler.reverse_process_step(z, u, t_cur, t_next)
+                
+                if return_traj:
+                    trajectory.append(z.cpu())
+            
+            if return_traj:
+                return trajectory
+            return z
 
 
 # ============================================================================
-# EXAMPLE USAGE
+# MODEL CREATION
 # ============================================================================
 
 def create_custom_model(device="cpu", **kwargs):
     """
-    Example function to create a custom generative model.
-    
-    Students should modify this function to create their specific model.
+    Create a MeanFlow model
     
     Args:
         device: Device to place model on
-        **kwargs: Additional arguments that can be passed to network or scheduler
-                  (e.g., num_train_timesteps, use_additional_condition for scalar conditions
-                   like step size in Shortcut Models or end timestep in Consistency Trajectory Models, etc.)
+        **kwargs: Additional arguments for scheduler and model configuration
     """
     
-    # Create U-Net backbone with FIXED hyperparameters
-    # DO NOT MODIFY THESE HYPERPARAMETERS
+    # Create U-Net backbone with additional condition for (t-r)
     network = UNet(
         ch=128,
         ch_mult=[1, 2, 2, 2],
@@ -170,13 +260,10 @@ def create_custom_model(device="cpu", **kwargs):
         use_additional_condition=kwargs.get('use_additional_condition', False)
     )
     
-    # Extract scheduler parameters with defaults
-    num_train_timesteps = kwargs.get('num_train_timesteps', 1000)
+    # Create MeanFlow scheduler - pass all kwargs directly
+    scheduler = MeanFlowScheduler(**kwargs)
     
-    # Create your scheduler
-    scheduler = CustomScheduler(num_train_timesteps=num_train_timesteps, **kwargs)
-    
-    # Create your model
-    model = CustomGenerativeModel(network, scheduler, **kwargs)
+    # Create MeanFlow model
+    model = MeanFlowModel(network, scheduler, **kwargs)
     
     return model.to(device)

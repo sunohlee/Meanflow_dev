@@ -83,8 +83,8 @@ def train_model(
         data = next(train_iterator)
         data = data.to(device)
         
-        # Generate noise
-        noise = data.clone()
+        # Generate noise (Gaussian noise, NOT a copy of data!)
+        noise = torch.randn_like(data)
         
         # Compute loss
         try:
@@ -267,11 +267,19 @@ if __name__ == "__main__":
     parser.add_argument("--num_train_timesteps", type=int, default=1000,
                        help="Number of training timesteps for scheduler")
     
-    # Students can add their own custom arguments below for their implementation
-    # For example:
-    # parser.add_argument("--sigma_min", type=float, default=0.001, help="Minimum noise level")
-    # parser.add_argument("--ema_decay", type=float, default=0.999, help="EMA decay rate")
-    # etc.
+    # MeanFlow specific arguments
+    parser.add_argument("--weighting", type=str, default="uniform", choices=["uniform", "adaptive"],
+                       help="Loss weighting strategy: uniform or adaptive")
+    parser.add_argument("--adaptive_p", type=float, default=1.0,
+                       help="Power parameter for adaptive weighting (only used when weighting=adaptive)")
+    parser.add_argument("--time_sampler", type=str, default="logit_normal", choices=["uniform", "logit_normal"],
+                       help="Time sampling strategy")
+    parser.add_argument("--time_mu", type=float, default=-0.4,
+                       help="Mean parameter for logit_normal time sampler")
+    parser.add_argument("--time_sigma", type=float, default=1.0,
+                       help="Std parameter for logit_normal time sampler")
+    parser.add_argument("--ratio_r_not_equal_t", type=float, default=0.75,
+                       help="Ratio of samples where r!=t (bootstrap ratio)")
     
     args = parser.parse_args()
 
