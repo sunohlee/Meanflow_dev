@@ -159,6 +159,8 @@ class MeanFlowModel(BaseGenerativeModel):
         
         # Apply adaptive weighting if specified
         if self.weighting == "adaptive":
+            # print(loss_per_sample)
+            # print(self.adaptive_p)
             weights = 1.0 / (loss_per_sample.detach() + 1e-3).pow(self.adaptive_p)
             loss = weights * loss_per_sample
         else:
@@ -187,12 +189,21 @@ class MeanFlowModel(BaseGenerativeModel):
             return self.network(xt, t)
     
     @torch.no_grad()
-    def sample(self, shape, num_inference_timesteps=1, return_traj=False, verbose=False, **kwargs):
+    def sample(self, shape, num_inference_timesteps=1, return_traj=False, verbose=False, use_2nd_order=True, **kwargs):
         """
-        MeanFlow sampling: z_0 = z_1 - (1-0) * u(z_1, 0, 1)
+        MeanFlow sampling with optional 2nd order solver
         
         For single-step (NFE=1): x_0 = x_1 - u(x_1, 0, 1)
-        For multi-step: iteratively apply z_r = z_t - (t-r) * u(z_t, r, t)
+        For multi-step: 
+            - 1st order: z_r = z_t - (t-r) * u(z_t, r, t)
+            - 2nd order (Heun): improved accuracy with midpoint correction
+        
+        Args:
+            shape: Shape of samples to generate
+            num_inference_timesteps: Number of denoising steps (NFE)
+            return_traj: Whether to return the full trajectory
+            verbose: Whether to show progress
+            use_2nd_order: Use 2nd order Heun method for NFE>=2 (default: True)
         """
         device = self.device
         batch_size = shape[0]
@@ -204,7 +215,7 @@ class MeanFlowModel(BaseGenerativeModel):
             trajectory = [z.cpu()]
         
         if num_inference_timesteps == 1:
-            # Single-step generation
+            # Single-step generation (always 1st order)
             r = torch.zeros(batch_size, device=device)
             t = torch.ones(batch_size, device=device)
             
@@ -219,18 +230,52 @@ class MeanFlowModel(BaseGenerativeModel):
             # Multi-step generation
             time_steps = torch.linspace(1, 0, num_inference_timesteps + 1, device=device)
             
-            for i in range(num_inference_timesteps):
-                t_cur = time_steps[i].item()
-                t_next = time_steps[i + 1].item()
+            if use_2nd_order:
+                # 2nd order Heun method (improved accuracy)
+                if verbose:
+                    print("Using 2nd order Heun sampler")
                 
-                t = torch.full((batch_size,), t_cur, device=device)
-                r = torch.full((batch_size,), t_next, device=device)
+                for i in range(num_inference_timesteps):
+                    t_cur = time_steps[i].item()
+                    t_next = time_steps[i + 1].item()
+                    dt = t_next - t_cur  # negative
+                    
+                    t = torch.full((batch_size,), t_cur, device=device)
+                    r = torch.full((batch_size,), t_next, device=device)
+                    
+                    # First stage: Euler step
+                    u_cur = self.predict(z, t, r=r)
+                    z_temp = z + dt * u_cur  # z at t_next (predictor)
+                    
+                    # Second stage: Corrector with midpoint
+                    t_next_tensor = torch.full((batch_size,), t_next, device=device)
+                    # For the second evaluation, we need u at (z_temp, t_next, t_next)
+                    # But this is still for going from t_next to somewhere
+                    # Actually, we evaluate u at the predicted point
+                    u_next = self.predict(z_temp, t_next_tensor, r=r)
+                    
+                    # Heun's method: average of two slopes
+                    z = z + dt * (u_cur + u_next) / 2
+                    
+                    if return_traj:
+                        trajectory.append(z.cpu())
+            else:
+                # 1st order Euler method
+                if verbose:
+                    print("Using 1st order Euler sampler")
                 
-                u = self.predict(z, t, r=r)
-                z = self.scheduler.reverse_process_step(z, u, t_cur, t_next)
-                
-                if return_traj:
-                    trajectory.append(z.cpu())
+                for i in range(num_inference_timesteps):
+                    t_cur = time_steps[i].item()
+                    t_next = time_steps[i + 1].item()
+                    
+                    t = torch.full((batch_size,), t_cur, device=device)
+                    r = torch.full((batch_size,), t_next, device=device)
+                    
+                    u = self.predict(z, t, r=r)
+                    z = self.scheduler.reverse_process_step(z, u, t_cur, t_next)
+                    
+                    if return_traj:
+                        trajectory.append(z.cpu())
             
             if return_traj:
                 return trajectory

@@ -30,12 +30,7 @@ def train_model(
     device="cpu",
     log_interval=500,
     save_interval=10000,
-    fid_interval=50000,
-    model_config=None,
-    adam_beta1=0.9,
-    adam_beta2=0.95,
-    adam_weight_decay=0.0,
-    max_grad_norm=1.0
+    model_config=None
 ):
     """
     Train a generative model.
@@ -56,14 +51,8 @@ def train_model(
     save_dir = Path(save_dir)
     save_dir.mkdir(exist_ok=True, parents=True)
     
-    # Create optimizer with MeanFlow parameters
-    optimizer = optim.Adam(
-        model.network.parameters(),
-        lr=lr,
-        betas=(adam_beta1, adam_beta2),
-        weight_decay=adam_weight_decay,
-        eps=1e-08
-    )
+    # Create optimizer
+    optimizer = optim.Adam(model.network.parameters(), lr=lr)
     
     # Save training configuration
     config = {
@@ -111,11 +100,6 @@ def train_model(
         # Backward pass
         optimizer.zero_grad()
         loss.backward()
-        
-        # Gradient clipping
-        if max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(model.network.parameters(), max_grad_norm)
-        
         optimizer.step()
         
         train_losses.append(loss.item())
@@ -161,42 +145,6 @@ def train_model(
             pil_images = tensor_to_pil_image(samples)
             for i, img in enumerate(pil_images):
                 img.save(save_dir / f"iter={iteration+1}_sample_{i}.png")
-        
-        # FID evaluation at intervals
-        if fid_interval > 0 and (iteration + 1) % fid_interval == 0:
-            print(f"\n{'='*60}")
-            print(f"FID Evaluation at iteration {iteration+1}")
-            print(f"{'='*60}")
-            
-            model.eval()
-            
-            # Generate samples for FID (NFE=1 and NFE=20)
-            for nfe in [1, 2, 4]:
-                sample_dir = save_dir / f"fid_samples_iter{iteration+1}_nfe{nfe}"
-                sample_dir.mkdir(exist_ok=True, parents=True)
-                
-                print(f"\nGenerating samples for NFE={nfe}...")
-                os.system(f"python sampling.py --ckpt_path {checkpoint_path} "
-                         f"--save_dir {sample_dir}"
-                         f"--num_samples 1000 --batch_size 32")
-                
-                print(f"\nComputing FID for NFE={nfe}...")
-                fid_result = os.popen(
-                    f"python measure_fid.py --generated_dir {sample_dir} "
-                ).read()
-                
-                # Save FID result
-                fid_log_path = save_dir / "fid_results.txt"
-                with open(fid_log_path, "a") as f:
-                    f.write(f"\n{'='*60}\n")
-                    f.write(f"Iteration: {iteration+1}, NFE: {nfe}\n")
-                    f.write(fid_result)
-                    f.write(f"{'='*60}\n")
-                
-                print(fid_result)
-            
-            model.train()
-            print(f"{'='*60}\n")
                 
     # Save final model
     final_path = save_dir / "final_model.pt"
@@ -216,11 +164,6 @@ def main(args):
     seed_everything(args.seed)
     print(f"Seed set to: {args.seed}")
     
-    # Set CUDA devices if specified
-    if args.cuda_visible_devices is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
-        print(f"CUDA_VISIBLE_DEVICES set to: {args.cuda_visible_devices}")
-    
     # Add timestamp if save directory is not specified
     if args.save_dir == "./results":
         args.save_dir = f"./results/{get_current_time()}"
@@ -228,8 +171,6 @@ def main(args):
     # Set device
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    if torch.cuda.is_available():
-        print(f"Available GPUs: {torch.cuda.device_count()}")
     
     # Create model
     print("Creating model...")
@@ -246,31 +187,13 @@ def main(args):
             model_kwargs[key] = value
 
     try:
-        # Create model WITHOUT moving to device first
         model = create_custom_model(
-            device='cpu',  # Create on CPU first
+            device=device,
             **model_kwargs
         )
         print(f"Model created: {type(model).__name__}")
         print(f"Scheduler: {type(model.scheduler).__name__}")
         print(f"Parameters: {sum(p.numel() for p in model.network.parameters()):,}")
-        
-        # Use DataParallel for multi-GPU if available
-        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-            num_gpus = torch.cuda.device_count()
-            print(f"\n=== Multi-GPU Setup with DataParallel ===")
-            print(f"Number of GPUs: {num_gpus}")
-            print(f"Batch size per GPU: {args.batch_size // num_gpus}")
-            print(f"Total effective batch size: {args.batch_size}")
-            
-            # Move model to GPU first
-            model = model.to(device)
-            # Then wrap network in DataParallel
-            model.network = torch.nn.DataParallel(model.network)
-            print(f"DataParallel enabled on GPUs: {list(range(num_gpus))}")
-        else:
-            print(f"\nUsing single GPU/CPU")
-            model = model.to(device)
     except NotImplementedError as e:
         print(f"Error: {e}")
         print("Please implement the CustomScheduler and CustomGenerativeModel classes in custom_model.py")
@@ -313,21 +236,16 @@ def main(args):
         device=device,
         log_interval=args.log_interval,
         save_interval=args.save_interval,
-        fid_interval=args.fid_interval,
-        model_config=model_config,
-        adam_beta1=args.adam_beta1,
-        adam_beta2=args.adam_beta2,
-        adam_weight_decay=args.adam_weight_decay,
-        max_grad_norm=args.max_grad_norm
+        model_config=model_config
     )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train generative model")
-    parser.add_argument("--batch_size", type=int, default=64,
-                       help="Batch size for training (will be split across GPUs)")
-    parser.add_argument("--num_iterations", type=int, default=250000,
-                       help="Number of training iterations (default: 250k)")
+    parser.add_argument("--batch_size", type=int, default=32,
+                       help="Batch size for training")
+    parser.add_argument("--num_iterations", type=int, default=100000,
+                       help="Number of training iterations")
     parser.add_argument("--lr", type=float, default=1e-4,
                        help="Learning rate")
     parser.add_argument("--save_dir", type=str, default="./results",
@@ -338,22 +256,8 @@ if __name__ == "__main__":
                        help="Interval for logging")
     parser.add_argument("--save_interval", type=int, default=10000,
                        help="Interval for saving checkpoints and samples")
-    parser.add_argument("--fid_interval", type=int, default=50000,
-                       help="Interval for FID evaluation (0 to disable)")
     parser.add_argument("--seed", type=int, default=42,
                        help="Random seed for reproducibility (default: 42)")
-    parser.add_argument("--cuda_visible_devices", type=str, default=None,
-                       help="Comma-separated GPU IDs to use (e.g., '0,1' for GPU 0 and 1)")
-    
-    # Optimizer parameters
-    parser.add_argument("--adam_beta1", type=float, default=0.9,
-                       help="Adam beta1 parameter")
-    parser.add_argument("--adam_beta2", type=float, default=0.95,
-                       help="Adam beta2 parameter")
-    parser.add_argument("--adam_weight_decay", type=float, default=0.0,
-                       help="Adam weight decay")
-    parser.add_argument("--max_grad_norm", type=float, default=1.0,
-                       help="Max gradient norm for clipping (0 to disable)")
 
     # Model-specific arguments (students can add more)
     # DO NOT MODIFY THE PROVIDED NETWORK HYPERPARAMETERS 
