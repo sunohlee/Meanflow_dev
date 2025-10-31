@@ -35,7 +35,9 @@ def train_model(
     adam_beta1=0.9,
     adam_beta2=0.95,
     adam_weight_decay=0.0,
-    max_grad_norm=1.0
+    max_grad_norm=1.0,
+    start_iteration=0,
+    resume_checkpoint_path=None
 ):
     """
     Train a generative model.
@@ -81,13 +83,52 @@ def train_model(
     train_losses = []
     
     print(f"Starting training for {num_iterations} iterations...")
+    if start_iteration > 0:
+        print(f"Resuming from iteration {start_iteration}")
     print(f"Model: {type(model).__name__}")
     print(f"Device: {device}")
     print(f"Save directory: {save_dir}")
     
+    # Run FID evaluation if resuming
+    if start_iteration > 0 and resume_checkpoint_path is not None:
+        print(f"\n{'='*60}")
+        print(f"Running FID evaluation before resuming training")
+        print(f"Checkpoint: {resume_checkpoint_path}")
+        print(f"{'='*60}")
+        
+        model.eval()
+        
+        # Generate samples for FID (NFE=1, 2, 4)
+        for nfe in [1, 2, 4]:
+            sample_dir = save_dir / f"fid_samples_iter{start_iteration}_nfe{nfe}"
+            sample_dir.mkdir(exist_ok=True, parents=True)
+            
+            print(f"\nGenerating samples for NFE={nfe}...")
+            cmd = f"python sampling.py --ckpt_path {resume_checkpoint_path} --save_dir {sample_dir} --num_samples 1000 --batch_size 32 --nfe_list {nfe}"
+            print(f"Running: {cmd}")
+            os.system(cmd)
+            
+            print(f"\nComputing FID for NFE={nfe}...")
+            fid_result = os.popen(
+                f"python measure_fid.py --generated_dir {sample_dir}"
+            ).read()
+            
+            # Save FID result
+            fid_log_path = save_dir / "fid_results.txt"
+            with open(fid_log_path, "a") as f:
+                f.write(f"\n{'='*60}\n")
+                f.write(f"Iteration: {start_iteration}, NFE: {nfe}\n")
+                f.write(fid_result)
+                f.write(f"{'='*60}\n")
+            
+            print(fid_result)
+        
+        print(f"{'='*60}\n")
+        print("FID evaluation completed! Resuming training...\n")
+    
     model.train()
     
-    pbar = tqdm(range(num_iterations), desc="Training")
+    pbar = tqdm(range(start_iteration, num_iterations), desc="Training")
     
     for iteration in pbar:
         # Get batch from infinite iterator
@@ -130,15 +171,42 @@ def train_model(
             
             # Save training loss curve
             try:
+                # Original curve with all data points
                 plt.figure(figsize=(10, 6))
-                plt.plot(train_losses)
+                plt.plot(train_losses, alpha=0.3, label='Raw Loss')
                 plt.xlabel('Iteration')
                 plt.ylabel('Loss')
                 plt.title('Training Loss')
+                plt.legend()
                 plt.grid(True)
                 plt.tight_layout()
                 plt.savefig(save_dir / "training_curves.png", dpi=150, bbox_inches='tight')
                 plt.close()
+                
+                # Smoothed curve with moving average
+                if len(train_losses) > 50:
+                    plt.figure(figsize=(10, 6))
+                    # Plot raw data with low opacity
+                    plt.plot(train_losses, alpha=0.2, color='blue', linewidth=0.5, label='Raw Loss')
+                    
+                    # Calculate moving average with window size
+                    window_size = min(100, max(10, len(train_losses) // 20))
+                    import numpy as np
+                    losses_array = np.array(train_losses)
+                    moving_avg = np.convolve(losses_array, np.ones(window_size)/window_size, mode='valid')
+                    
+                    # Plot moving average
+                    x_smooth = np.arange(window_size-1, len(train_losses))
+                    plt.plot(x_smooth, moving_avg, color='red', linewidth=2, label=f'Moving Avg (window={window_size})')
+                    
+                    plt.xlabel('Iteration')
+                    plt.ylabel('Loss')
+                    plt.title('Training Loss (Smoothed)')
+                    plt.legend()
+                    plt.grid(True, alpha=0.3)
+                    plt.tight_layout()
+                    plt.savefig(save_dir / "training_curves_smoothed.png", dpi=150, bbox_inches='tight')
+                    plt.close()
             except Exception as e:
                 print(f"Warning: Could not save training curve: {e}")
         
@@ -176,9 +244,8 @@ def train_model(
                 sample_dir.mkdir(exist_ok=True, parents=True)
                 
                 print(f"\nGenerating samples for NFE={nfe}...")
-                os.system(f"python sampling.py --ckpt_path {checkpoint_path} "
-                         f"--save_dir {sample_dir}"
-                         f"--num_samples 1000 --batch_size 32")
+                cmd = f"python sampling.py --ckpt_path {checkpoint_path} --save_dir {sample_dir} --nfe_list {nfe}"
+                os.system(cmd)
                 
                 print(f"\nComputing FID for NFE={nfe}...")
                 fid_result = os.popen(
@@ -271,6 +338,55 @@ def main(args):
         else:
             print(f"\nUsing single GPU/CPU")
             model = model.to(device)
+        
+        # Load checkpoint if resuming
+        start_iteration = 0
+        if args.resume_from is not None:
+            print(f"\nLoading checkpoint from: {args.resume_from}")
+            checkpoint = torch.load(args.resume_from, map_location=device)
+            
+            # Handle different checkpoint formats
+            if 'state_dict' in checkpoint:
+                state_dict = checkpoint['state_dict']
+            elif 'model_state_dict' in checkpoint:
+                state_dict = checkpoint['model_state_dict']
+            else:
+                state_dict = checkpoint
+            
+            # # Check if state_dict has 'network.' prefix (full model) or not (network only)
+            # first_key = list(state_dict.keys())[0] if state_dict else ""
+            
+            # if first_key.startswith('network.'):
+            #     # Full model state dict - load to model
+            #     if hasattr(model.network, 'module'):
+            #         # DataParallel case: need to handle prefix
+            #         # Remove 'network.' prefix and load to module
+            #         network_state = {k.replace('network.', ''): v for k, v in state_dict.items() if k.startswith('network.')}
+            #         model.network.module.load_state_dict(network_state)
+            #     else:
+            #         # Load full model state dict
+            #         model.load_state_dict(state_dict)
+            # else:
+            #     # Network only state dict
+            #     if hasattr(model.network, 'module'):
+            #         model.network.module.load_state_dict(state_dict)
+            #     else:
+            #         model.network.load_state_dict(state_dict)
+            # Simply load the full model state dict
+            model.load_state_dict(state_dict)
+            
+            # Try to get iteration number from checkpoint
+            if 'iteration' in checkpoint:
+                start_iteration = checkpoint['iteration']
+            else:
+                # Extract from filename: checkpoint_iter_20000.pt
+                import re
+                match = re.search(r'iter_(\d+)', str(args.resume_from))
+                if match:
+                    start_iteration = int(match.group(1))
+            
+            print(f"Checkpoint loaded! Resuming from iteration {start_iteration}")
+            
     except NotImplementedError as e:
         print(f"Error: {e}")
         print("Please implement the CustomScheduler and CustomGenerativeModel classes in custom_model.py")
@@ -318,7 +434,9 @@ def main(args):
         adam_beta1=args.adam_beta1,
         adam_beta2=args.adam_beta2,
         adam_weight_decay=args.adam_weight_decay,
-        max_grad_norm=args.max_grad_norm
+        max_grad_norm=args.max_grad_norm,
+        start_iteration=start_iteration,
+        resume_checkpoint_path=args.resume_from
     )
 
 
@@ -344,6 +462,8 @@ if __name__ == "__main__":
                        help="Random seed for reproducibility (default: 42)")
     parser.add_argument("--cuda_visible_devices", type=str, default=None,
                        help="Comma-separated GPU IDs to use (e.g., '0,1' for GPU 0 and 1)")
+    parser.add_argument("--resume_from", type=str, default=None,
+                       help="Path to checkpoint to resume training from (e.g., results/xxx/checkpoint_iter_20000.pt)")
     
     # Optimizer parameters
     parser.add_argument("--adam_beta1", type=float, default=0.9,

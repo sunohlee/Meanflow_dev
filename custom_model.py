@@ -132,25 +132,28 @@ class MeanFlowModel(BaseGenerativeModel):
         v_t = self.scheduler.get_target(data, noise, t)
         time_diff = (t - r).view(-1, 1, 1, 1)
         
-        # Predict u(z_t, r, t) using the network
+        # Predict u(z_t, t, Δt) using the network
         u = self.predict(z_t, t, r=r)
         
-        # Compute JVP: ∂u/∂t using automatic differentiation
-        # CRITICAL: Pre-compute time_diff outside JVP to avoid unwanted derivatives
+        # Compute JVP: du/dt using automatic differentiation
+        # Following original MeanFlow: r is treated as constant, but
+        # the condition (t-r) is computed INSIDE the JVP function so that
+        # PyTorch can automatically differentiate through the embedding layers
+        # This gives: du/dt = ∂u/∂z * dz/dt + ∂u/∂t (with condition dependency on t)
         network = self.network.module if isinstance(self.network, torch.nn.DataParallel) else self.network
-        time_diff_for_condition = t - r  # Pre-compute OUTSIDE JVP
         
         def fn_for_jvp(z, cur_t):
-            # Use pre-computed time_diff (constant in JVP)
-            # This ensures we only compute ∂u/∂t, not ∂u/∂condition
-            return network(z, cur_t, condition=time_diff_for_condition)
+            # Compute condition inside JVP to allow differentiation through embedding
+            # This matches original MeanFlow where r_embed = self.r_embedder(t-r)
+            cur_condition = cur_t - r
+            return network(z, cur_t, condition=cur_condition)
         
-        # JVP w.r.t. z and t only
+        # JVP w.r.t. z and t (r is constant, but t-r computation is inside function)
         primals = (z_t, t)
         tangents = (v_t, torch.ones_like(t))
         _, dudt = jvp(fn_for_jvp, primals, tangents)
         
-        # Bootstrap target: v_t - (t-r) * ∂u/∂t
+        # Bootstrap target: v_t - (t-r) * du/dt
         u_target = v_t - time_diff * dudt
         
         # Compute loss

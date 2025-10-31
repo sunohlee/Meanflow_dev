@@ -30,6 +30,11 @@ def setup_ddp(rank, world_size):
     # torchrun sets MASTER_ADDR, MASTER_PORT, RANK, WORLD_SIZE automatically
     # We just need to call init_process_group
     
+    # Suppress NCCL debug info
+    os.environ['NCCL_DEBUG'] = 'WARN'  # Only show warnings and errors
+    os.environ['NCCL_DEBUG_SUBSYS'] = 'OFF'  # Disable subsystem debug info
+    # os.environ['NCCL_DEBUG'] = 'VERSION'  # Even less verbose option
+    
     timeout = timedelta(seconds=180)
     
     print(f"[Rank {rank}] Initializing process group...")
@@ -195,15 +200,42 @@ def train_model(
             
             # Save training loss curve
             try:
+                # Original curve with all data points
                 plt.figure(figsize=(10, 6))
-                plt.plot(train_losses)
+                plt.plot(train_losses, alpha=0.3, label='Raw Loss')
                 plt.xlabel('Iteration')
                 plt.ylabel('Loss')
                 plt.title('Training Loss')
+                plt.legend()
                 plt.grid(True)
                 plt.tight_layout()
                 plt.savefig(save_dir / "training_curves.png", dpi=150, bbox_inches='tight')
                 plt.close()
+                
+                # Smoothed curve with moving average
+                if len(train_losses) > 50:
+                    plt.figure(figsize=(10, 6))
+                    # Plot raw data with low opacity
+                    plt.plot(train_losses, alpha=0.2, color='blue', linewidth=0.5, label='Raw Loss')
+                    
+                    # Calculate moving average with window size
+                    window_size = min(100, max(10, len(train_losses) // 20))
+                    import numpy as np
+                    losses_array = np.array(train_losses)
+                    moving_avg = np.convolve(losses_array, np.ones(window_size)/window_size, mode='valid')
+                    
+                    # Plot moving average
+                    x_smooth = np.arange(window_size-1, len(train_losses))
+                    plt.plot(x_smooth, moving_avg, color='red', linewidth=2, label=f'Moving Avg (window={window_size})')
+                    
+                    plt.xlabel('Iteration')
+                    plt.ylabel('Loss')
+                    plt.title('Training Loss (Smoothed)')
+                    plt.legend()
+                    plt.grid(True, alpha=0.3)
+                    plt.tight_layout()
+                    plt.savefig(save_dir / "training_curves_smoothed.png", dpi=150, bbox_inches='tight')
+                    plt.close()
             except Exception as e:
                 print(f"Warning: Could not save training curve: {e}")
         
@@ -247,9 +279,8 @@ def train_model(
                 sample_dir.mkdir(exist_ok=True, parents=True)
                 
                 print(f"\nGenerating samples for NFE={nfe}...")
-                os.system(f"python sampling.py --ckpt_path {checkpoint_path} "
-                         f"--save_dir {sample_dir} "
-                         f"--num_samples 1000 --batch_size 32 --nfe {nfe}")
+                cmd = f"CUDA_VISIBLE_DEVICES=0 python sampling.py --ckpt_path {checkpoint_path} --save_dir {sample_dir} --nfe_list {nfe}"
+                os.system(cmd)
                 
                 print(f"\nComputing FID for NFE={nfe}...")
                 fid_result = os.popen(
