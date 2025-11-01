@@ -1,0 +1,58 @@
+============================================================
+Computing FID
+============================================================
+Generated: ./samples/final_4_ddp/nfe=1
+Reference: ./data/simpsons_64x64/val
+
+Computing FID...
+  Generated: ./samples/final_4_ddp/nfe=1                                      3it/s, Loss
+  Reference: ./data/simpsons_64x64/val
+compute FID between two folders
+Found 1000 images in the folder ./samples/final_4_ddp/nfe=1
+FID nfe=1 : 100%|█████████████████████████████| 16/16 [01:42<00:00,  6.38s/it]
+Found 1000 images in the folder ./data/simpsons_64x64/val
+FID val : 100%|███████████████████████████████| 16/16 [00:02<00:00,  5.69it/s]
+
+============================================================
+FID Score: 90.3408
+============================================================
+
+
+============================================================
+Computing FID
+============================================================
+Generated: ./samples/final_4_ddp/nfe=2
+Reference: ./data/simpsons_64x64/val
+
+Computing FID...
+  Generated: ./samples/final_4_ddp/nfe=2
+  Reference: ./data/simpsons_64x64/val
+compute FID between two folders
+Found 1000 images in the folder ./samples/final_4_ddp/nfe=2
+FID nfe=2 : 100%|█████████████████████████████| 16/16 [01:45<00:00,  6.59s/it]
+Found 1000 images in the folder ./data/simpsons_64x64/val
+FID val : 100%|███████████████████████████████| 16/16 [00:02<00:00,  5.60it/s]
+
+============================================================
+FID Score: 41.4991
+============================================================
+
+
+============================================================
+Computing FID
+============================================================
+Generated: ./samples/final_4_ddp/nfe=4
+Reference: ./data/simpsons_64x64/val
+
+Computing FID...
+  Generated: ./samples/final_4_ddp/nfe=4
+  Reference: ./data/simpsons_64x64/val
+compute FID between two folders
+Found 1000 images in the folder ./samples/final_4_ddp/nfe=4
+FID nfe=4 : 100%|█████████████████████████████| 16/16 [01:44<00:00,  6.53s/it]
+Found 1000 images in the folder ./data/simpsons_64x64/val
+FID val : 100%|███████████████████████████████| 16/16 [00:02<00:00,  5.60it/s]
+
+============================================================
+FID Score: 33.4572
+============================================================
