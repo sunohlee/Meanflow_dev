@@ -4,6 +4,15 @@ Skeleton training script for generative models
 Students need to implement their own model classes and modify this script accordingly.
 """
 
+# --------------------------------------------------------------------------------
+# Parts of this file were modified based on the code from the MeanFlow project.
+# Original Repository: https://github.com/zhuyu-cs/MeanFlow
+#
+# MeanFlow: Recovering General 3D Clothed Human Shape and Motion from Monocular Videos
+# Yu Zhu, Siyou Peng, Yuxiang Wang, Yipeng Yang, C. L. Philip Lei, Yujun Yang
+# CVPR 2024
+# --------------------------------------------------------------------------------
+
 import json
 import argparse
 import torch

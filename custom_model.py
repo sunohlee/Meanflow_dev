@@ -4,6 +4,15 @@ MeanFlow implementation - Minimal version based on MeanFlow paper
 Single-step flow matching with bootstrap mechanism
 """
 
+# --------------------------------------------------------------------------------
+# Parts of this file were modified based on the code from the MeanFlow project.
+# Original Repository: https://github.com/zhuyu-cs/MeanFlow
+#
+# MeanFlow: Recovering General 3D Clothed Human Shape and Motion from Monocular Videos
+# Yu Zhu, Siyou Peng, Yuxiang Wang, Yipeng Yang, C. L. Philip Lei, Yujun Yang
+# CVPR 2024
+# --------------------------------------------------------------------------------
+
 import torch
 import torch.nn as nn
 import numpy as np
