@@ -465,6 +465,12 @@ def main_worker(rank, world_size, args):
         for key, value in args.__dict__.items():
             if key not in excluded_keys and value is not None:
                 model_kwargs[key] = value
+        
+        # Convert rzero flag to r_zero_ratio parameter
+        if 'rzero' in model_kwargs:
+            if model_kwargs['rzero']:
+                model_kwargs['r_zero_ratio'] = 0.1  # 10% r=0 samples
+            del model_kwargs['rzero']  # Remove the flag
 
         try:
             # Create model WITHOUT moving to device first
@@ -598,6 +604,12 @@ def main(args):
         for key, value in args.__dict__.items():
             if key not in excluded_keys and value is not None:
                 model_kwargs[key] = value
+        
+        # Convert rzero flag to r_zero_ratio parameter
+        if 'rzero' in model_kwargs:
+            if model_kwargs['rzero']:
+                model_kwargs['r_zero_ratio'] = 0.1  # 10% r=0 samples
+            del model_kwargs['rzero']  # Remove the flag
 
         try:
             # Create model WITHOUT moving to device first
@@ -700,6 +712,8 @@ if __name__ == "__main__":
                        help="Mean parameter for logit_normal time sampler")
     parser.add_argument("--time_sigma", type=float, default=2.0,
                        help="Std parameter for logit_normal time sampler")
+    parser.add_argument("--rzero", action="store_true",
+                       help="Add 10%% r=0 samples for better single-step performance")
     
     args = parser.parse_args()
 

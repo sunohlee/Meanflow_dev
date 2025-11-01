@@ -37,6 +37,7 @@ class MeanFlowScheduler(BaseScheduler):
         self.time_mu = kwargs.get('time_mu', -0.4)
         self.time_sigma = kwargs.get('time_sigma', 1.0)
         self.ratio_r_not_equal_t = kwargs.get('ratio_r_not_equal_t', 0.75)
+        self.r_zero_ratio = kwargs.get('r_zero_ratio', 0.0)  # Default: disabled
     
     def interpolant(self, t):
         """Define interpolation function for flow matching"""
@@ -54,6 +55,8 @@ class MeanFlowScheduler(BaseScheduler):
         """
         Sample time steps (r, t) for MeanFlow training
         Returns two timesteps: r (start) and t (end) where t > r
+        
+        If r_zero_ratio > 0, adds explicit r=0 samples for better single-step performance
         """
         if self.time_sampler == "uniform":
             time_samples = torch.rand(batch_size, 2, device=device)
@@ -68,10 +71,31 @@ class MeanFlowScheduler(BaseScheduler):
         sorted_samples, _ = torch.sort(time_samples, dim=1)
         r, t = sorted_samples[:, 0], sorted_samples[:, 1]
         
-        # Control proportion of r=t samples
-        fraction_equal = 1.0 - self.ratio_r_not_equal_t
-        equal_mask = torch.rand(batch_size, device=device) < fraction_equal
-        r = torch.where(equal_mask, t, r)
+        # Strategy: First select r=0 samples, then apply r=t/r≠t ratio to remaining samples
+        # This ensures clean separation and respects the original ratio_r_not_equal_t parameter
+        # Example with r_zero_ratio=0.1, ratio_r_not_equal_t=0.75:
+        #   - r=0:  10%
+        #   - r=t:  90% × 25% = 22.5%
+        #   - r≠t:  90% × 75% = 67.5%
+        
+        if self.r_zero_ratio > 0:
+            # First, select r=0 samples
+            r_zero_mask = torch.rand(batch_size, device=device) < self.r_zero_ratio
+            
+            # For remaining samples (not r=0), control proportion of r=t samples
+            fraction_equal = 1.0 - self.ratio_r_not_equal_t
+            equal_mask = torch.rand(batch_size, device=device) < fraction_equal
+            # Apply equal_mask only to non-r=0 samples
+            equal_mask = equal_mask & (~r_zero_mask)
+            
+            # Apply the masks: first r=t, then r=0
+            r = torch.where(equal_mask, t, r)
+            r = torch.where(r_zero_mask, torch.zeros_like(r), r)
+        else:
+            # Original behavior: just control r=t proportion
+            fraction_equal = 1.0 - self.ratio_r_not_equal_t
+            equal_mask = torch.rand(batch_size, device=device) < fraction_equal
+            r = torch.where(equal_mask, t, r)
         
         return r, t
     
