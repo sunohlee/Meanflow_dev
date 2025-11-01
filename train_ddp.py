@@ -35,8 +35,6 @@ def setup_ddp(rank, world_size):
     os.environ['NCCL_DEBUG_SUBSYS'] = 'OFF'  # Disable subsystem debug info
     # os.environ['NCCL_DEBUG'] = 'VERSION'  # Even less verbose option
     
-    timeout = timedelta(seconds=180)
-    
     print(f"[Rank {rank}] Initializing process group...")
     print(f"[Rank {rank}] Available CUDA devices: {torch.cuda.device_count()}")
     print(f"[Rank {rank}] Env RANK: {os.environ.get('RANK')}")
@@ -47,6 +45,9 @@ def setup_ddp(rank, world_size):
     
     try:
         # Use default initialization (torchrun sets everything)
+        # Set long timeout for FID evaluation (rank 0 may take time while others wait)
+        timeout = timedelta(minutes=30)  # 30 minutes timeout for FID evaluation
+        
         dist.init_process_group(
             backend="nccl",
             timeout=timeout
@@ -89,7 +90,9 @@ def train_model(
     adam_weight_decay=0.0,
     max_grad_norm=1.0,
     rank=0,
-    world_size=1
+    world_size=1,
+    start_iteration=0,
+    resume_checkpoint_path=None
 ):
     """
     Train a generative model.
@@ -124,6 +127,53 @@ def train_model(
         eps=1e-08
     )
     
+    # Load checkpoint if resuming
+    if resume_checkpoint_path is not None:
+        if rank == 0:
+            print(f"\nLoading checkpoint from: {resume_checkpoint_path}")
+            checkpoint = torch.load(resume_checkpoint_path, map_location=device)
+            
+            # Get model without DDP wrapper
+            model_to_load = model.module if hasattr(model, 'module') else model
+            
+            # Handle different checkpoint formats
+            if 'state_dict' in checkpoint:
+                state_dict = checkpoint['state_dict']
+            elif 'model_state_dict' in checkpoint:
+                state_dict = checkpoint['model_state_dict']
+            else:
+                state_dict = checkpoint
+            
+            model_to_load.load_state_dict(state_dict)
+            print(f"Model state loaded from checkpoint")
+            
+            # Load optimizer state if available
+            if 'optimizer_state_dict' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                print(f"Optimizer state loaded from checkpoint")
+        
+        # Synchronize checkpoint loading across all ranks
+        # Broadcast parameters from rank 0 to all other ranks
+        if world_size > 1:
+            for param in model.parameters():
+                dist.broadcast(param.data, src=0)
+            
+            # Verify all ranks have same weights (checksum)
+            dist.barrier()
+            param_sum = sum(p.sum().item() for p in model.parameters())
+            param_sums = [torch.tensor(0.0, device=device) for _ in range(world_size)]
+            dist.all_gather(param_sums, torch.tensor(param_sum, device=device))
+            
+            if rank == 0:
+                param_sums_cpu = [p.item() for p in param_sums]
+                if len(set([f"{p:.6f}" for p in param_sums_cpu])) == 1:
+                    print(f"✓ All ranks have identical weights (checksum: {param_sums_cpu[0]:.6f})")
+                else:
+                    print(f"✗ WARNING: Ranks have different weights! {param_sums_cpu}")
+    
+    if world_size > 1:
+        dist.barrier()
+    
     # Save training configuration (only on rank 0)
     if rank == 0:
         config = {
@@ -143,6 +193,8 @@ def train_model(
     
     if rank == 0:
         print(f"Starting training for {num_iterations} iterations...")
+        if start_iteration > 0:
+            print(f"Resuming from iteration {start_iteration}")
         print(f"Model: {type(model).__name__}")
         print(f"Device: {device}")
         print(f"World size: {world_size}")
@@ -153,7 +205,7 @@ def train_model(
     
     # Only show progress bar on rank 0
     print(f"[Rank {rank}] Creating progress bar...")
-    pbar = tqdm(range(num_iterations), desc="Training", disable=(rank != 0))
+    pbar = tqdm(range(start_iteration, num_iterations), desc="Training", disable=(rank != 0), initial=start_iteration, total=num_iterations)
     
     print(f"[Rank {rank}] Starting training loop...")
     
@@ -442,6 +494,16 @@ def main_worker(rank, world_size, args):
             print(f"Total parameters: {total_params:,}")
             print(f"Trainable parameters: {trainable_params:,}")
         
+        # Extract start iteration from checkpoint filename if resuming
+        start_iteration = 0
+        if args.resume_from is not None:
+            import re
+            match = re.search(r'iter_(\d+)', str(args.resume_from))
+            if match:
+                start_iteration = int(match.group(1))
+            if rank == 0:
+                print(f"Resuming from iteration {start_iteration}")
+        
         # Train model
         train_model(
             model=model,
@@ -459,7 +521,9 @@ def main_worker(rank, world_size, args):
             adam_weight_decay=args.adam_weight_decay,
             max_grad_norm=args.max_grad_norm,
             rank=rank,
-            world_size=world_size
+            world_size=world_size,
+            start_iteration=start_iteration,
+            resume_checkpoint_path=args.resume_from
         )
         
         # Cleanup DDP
@@ -597,6 +661,8 @@ if __name__ == "__main__":
                        help="Random seed for reproducibility (default: 42)")
     parser.add_argument("--num_workers", type=int, default=4,
                        help="Number of data loading workers")
+    parser.add_argument("--resume_from", type=str, default=None,
+                       help="Path to checkpoint to resume from (e.g., ./results/exp/checkpoint_iter_10000.pt)")
     
     # Optimizer parameters
     parser.add_argument("--adam_beta1", type=float, default=0.9,
