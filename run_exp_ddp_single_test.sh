@@ -45,3 +45,4 @@ python train_ddp.py --batch_size 32  \
   --adam_beta2 0.95 \
   --adam_weight_decay 0.0 \
   --max_grad_norm 1.0 \
+  --resume_from ./results/meanflow_final_4_ddp/checkpoint_iter_10000.pt

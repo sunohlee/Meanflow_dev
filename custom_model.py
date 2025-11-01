@@ -192,7 +192,7 @@ class MeanFlowModel(BaseGenerativeModel):
             return self.network(xt, t)
     
     @torch.no_grad()
-    def sample(self, shape, num_inference_timesteps=1, return_traj=False, verbose=False, use_2nd_order=True, **kwargs):
+    def sample(self, shape, num_inference_timesteps=1, return_traj=False, verbose=False, use_2nd_order=False, **kwargs):
         """
         MeanFlow sampling with optional 2nd order solver
         

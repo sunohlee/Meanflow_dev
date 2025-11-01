@@ -127,15 +127,17 @@ def train_model(
         eps=1e-08
     )
     
-    # Load checkpoint if resuming
+    # Load checkpoint if resuming (only on rank 0, then broadcast)
     if resume_checkpoint_path is not None:
         if rank == 0:
             print(f"\nLoading checkpoint from: {resume_checkpoint_path}")
-            checkpoint = torch.load(resume_checkpoint_path, map_location=device)
-            
-            # Get model without DDP wrapper
-            model_to_load = model.module if hasattr(model, 'module') else model
-            
+        
+        checkpoint = torch.load(resume_checkpoint_path, map_location=device) if rank == 0 else None
+        
+        # Get model without DDP wrapper
+        model_to_load = model.module if hasattr(model, 'module') else model
+        
+        if rank == 0:
             # Handle different checkpoint formats
             if 'state_dict' in checkpoint:
                 state_dict = checkpoint['state_dict']
@@ -151,25 +153,29 @@ def train_model(
             if 'optimizer_state_dict' in checkpoint:
                 optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
                 print(f"Optimizer state loaded from checkpoint")
-        
-        # Synchronize checkpoint loading across all ranks
+    
+    # Synchronize checkpoint loading across all ranks
+    # DDP automatically broadcasts rank 0's parameters during initialization,
+    # but since we loaded checkpoint AFTER DDP wrap, we need to manually broadcast
+    if world_size > 1 and resume_checkpoint_path is not None:
         # Broadcast parameters from rank 0 to all other ranks
-        if world_size > 1:
-            for param in model.parameters():
-                dist.broadcast(param.data, src=0)
-            
-            # Verify all ranks have same weights (checksum)
-            dist.barrier()
-            param_sum = sum(p.sum().item() for p in model.parameters())
-            param_sums = [torch.tensor(0.0, device=device) for _ in range(world_size)]
-            dist.all_gather(param_sums, torch.tensor(param_sum, device=device))
-            
-            if rank == 0:
-                param_sums_cpu = [p.item() for p in param_sums]
-                if len(set([f"{p:.6f}" for p in param_sums_cpu])) == 1:
-                    print(f"✓ All ranks have identical weights (checksum: {param_sums_cpu[0]:.6f})")
-                else:
-                    print(f"✗ WARNING: Ranks have different weights! {param_sums_cpu}")
+        for param in model.parameters():
+            dist.broadcast(param.data, src=0)
+        if rank == 0:
+            print("Checkpoint weights broadcasted to all ranks")
+        
+        # Verify all ranks have same weights (checksum)
+        dist.barrier()
+        param_sum = sum(p.sum().item() for p in model.parameters())
+        param_sums = [torch.tensor(0.0, device=device) for _ in range(world_size)]
+        dist.all_gather(param_sums, torch.tensor(param_sum, device=device))
+        
+        if rank == 0:
+            param_sums_cpu = [p.item() for p in param_sums]
+            if len(set([f"{p:.6f}" for p in param_sums_cpu])) == 1:
+                print(f"✓ All ranks have identical weights (checksum: {param_sums_cpu[0]:.6f})")
+            else:
+                print(f"✗ WARNING: Ranks have different weights! {param_sums_cpu}")
     
     if world_size > 1:
         dist.barrier()
